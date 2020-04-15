@@ -15,7 +15,7 @@
 
 ---
 - name: Performing zypper update on host(s)
-  hosts: teste
+  hosts: all
   remote_user: ansible
   become: yes
   become_method: sudo
