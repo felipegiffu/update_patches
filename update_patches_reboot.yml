@@ -1,0 +1,281 @@
+####################################################################################
+## [SUSE_Patches_reboot.yml]
+## --
+## Authors        : Renato Alexandre da Rocha (ralex@br.ibm.com) @ralex
+## Squad          : GI_SSI_OM_S1 Squad
+##
+#####################################################################################
+
+#####################################################################################
+## Script Purpose : Playbook to perform 'zypper update' on selected hosts.
+##                  This playbook will also reboot hosts if kernel is updated.
+##
+## Supported OS:  SLES (SUSE Linux Enterprise Server)
+#####################################################################################
+
+---
+- name: Performing zypper update on host(s)
+  hosts: ZLINUX_ZTRAINING
+  remote_user: ansible
+  become: yes
+  become_method: sudo
+  any_errors_fatal: false
+
+  pre_tasks:
+
+
+        ##########################################################################
+        ## Creating the directory to save the output of scripts
+        ##########################################################################
+        - name: Create the directory /tmp/patches_script-output if it does not exist
+          file:
+            path: /tmp/patches_script-output
+            state: directory
+            mode: '0775'
+
+        ##########################################################################
+        ## copytools
+        ##########################################################################
+        - name: Running copytools
+          shell: sh /usr/local/support/copytools > /tmp/patches_script-output/copytools
+
+        ##########################################################################
+        ## FIX bind issue
+        ##########################################################################
+        - name: Running script to FIX bind issue
+          shell: sh /usr/local/support/sles12/fix_bind_ldap.sh > /tmp/patches_script-output/fix_bind_ldap
+
+        ##########################################################################
+        ## Cleanup in the /var and /tmp
+        ##########################################################################
+        - name: Running script to clean the /var and /tmp
+          shell: sh /usr/local/support/cleanup_var > /tmp/patches_script-output/cleanup_var ; /usr/local/support/cleanup_tmp > /tmp/patches_script-output/cleanup_tmp
+
+        ##########################################################################
+        ## Check if server has available space on / and /var filesystems
+        ##########################################################################
+        - name: Running script to check if the server has available space on / and /var
+          shell: sh /usr/local/support/check_diskspace > /tmp/patches_script-output/check_diskspace
+
+        - name: Checking the space available
+          lineinfile:
+            path: /tmp/patches_script-output/check_diskspace
+            regexp: "^OK:"
+            state: absent
+          check_mode: yes
+          changed_when: false
+          register: chk_disk
+
+        - debug:
+            msg: "OK: Check has been completed. Space is available."
+          when: chk_disk.found
+
+        - debug:
+            msg: "WARN: INSUFFICIENT SPACE - /var or / is full, please check it and ensure that you have the /var with more than 500 MB and / with more than 80 MB. STOPPING THE PLAYBOOK"
+          when: not chk_disk.found
+
+        - meta: end_play
+          when: not chk_disk.found
+
+        ##########################################################################
+        ## Checking if zypper is set up
+        ##########################################################################
+        - name: Checking if zypper is set up
+          shell: sh /usr/local/support/config_zypper -a > /tmp/patches_script-output/config_zypper ; zypper refresh > /tmp/patches_script-output/zypper_refresh ; zypper lp > /tmp/patches_script-output/zypper_lp
+
+        ##########################################################################
+        ## Backup of PAM settings
+        ##########################################################################
+        - name: Making backup of PAM settings
+          shell: sh /usr/local/support/patches/pam-backup.sh > /tmp/patches_script-output/pam-backup
+
+        ##########################################################################
+        ## Checking if the disk 20f is enabled in the server
+        ##########################################################################
+        - name: Checking if the disk 20f is enabled in the server
+          shell: sh /sbin/vmcp link '*' 20f 20f mr; sh /sbin/lsdasd | grep 20f > /tmp/patches_script-output/20f_check
+
+        ##########################################################################
+        ## Update the /boot2
+        ##########################################################################
+        - name: Refreshing the disk 20f (/boot2)
+          shell: sh /usr/local/support/updtboot2 > /tmp/patches_script-output/updtboot2
+
+        ##########################################################################
+        ## Checking if the update of 20f was completed successfully
+        ##########################################################################
+        - name: Checking if the update of 20f was completed successfully
+          lineinfile:
+            path: /tmp/patches_script-output/updtboot2
+            regexp: "set-up.$"
+            state: absent
+          check_mode: yes
+          changed_when: false
+          register: chk_20f
+
+        - debug:
+            msg: "Disk 20f (/boot2) was configured successfully."
+          when: chk_20f.found
+
+        - debug:
+            msg: "WARN: The update of 20f wasn't completed. Please check the log saved in the /tmp/patches_script-output/updtboot2 and fix it to to continue with system update. STOPPING THE PLAYBOOK."
+          when: not chk_20f.found
+
+        - meta: end_play
+          when: not chk_20f.found
+
+        ##########################################################################
+        ## Remove zypper lock
+        ##########################################################################
+        - name: Remove the zypper lock
+          shell: for i in $(zypper ll | awk 'f;/#/{f=1;}' | awk 'f;/--/{f=1;}' | awk '{ print $1 }' | tac ); do zypper rl $i; done > /tmp/patches_script-output/zypper_rl
+
+  tasks:
+
+        ###########################################################################
+        ## Check if the server has updates available to be installed
+        ###########################################################################
+        - name: Checking patches available for updates
+          shell: zypper list-updates | awk 'f;/Name/{f=1;}' | awk '{ print $5 }'
+          changed_when: updates.stdout_lines | length > 0
+          args:
+              warn: false
+          register: updates
+
+        ###########################################################################
+        ## Display the patches available
+        ###########################################################################
+        - name: Display patches available to be installed
+          debug:
+            msg: "Found {{ updates.stdout_lines | length }} packages to be updated:{{ updates.stdout | replace('\n', '   ') }}"
+
+        ##########################################################################
+        ## Install all packages
+        ##########################################################################
+        - name: Updating all packages
+          zypper:
+            name: '*'
+            state: latest
+
+          tags:
+            - skip_ansible_lint
+
+        ##########################################################################
+        ## Running the script /usr/local/support/layer2/restore.sh
+        ##########################################################################
+        - name: Running the script /usr/local/support/layer2/restore.sh
+          shell: sh /usr/local/support/layer2/restore.sh > /tmp/patches_script-output/layer2_restore_before_reboot
+
+        ##########################################################################
+        ## Running the script /usr/sbin/grub2-zipl-setup
+        ##########################################################################
+        - name: Running the script /usr/sbin/grub2-zipl-setup
+          shell: /usr/sbin/grub2-zipl-setup > /tmp/patches_script-output/grub2-zipl-setup_before_reboot
+
+        ##########################################################################
+        ## Running the script /usr/local/support/sles12/emergency_shell.sh
+        ##########################################################################
+        - name: Running the script /usr/local/support/sles12/emergency_shell.sh
+          shell: sh /usr/local/support/sles12/emergency_shell.sh > /tmp/patches_script-output/emergency_shell
+
+        ##########################################################################
+        ## Running the script /usr/local/support/upgrades/sles12/fix_rsyslog.sh
+        ##########################################################################
+        - name: Running the script /usr/local/support/upgrades/sles12/fix_rsyslog.sh
+          shell: sh /usr/local/support/upgrades/sles12/fix_rsyslog.sh > /tmp/patches_script-output/fix_rsyslog
+
+        ##########################################################################
+        ## Running the script the checklist
+        ##########################################################################
+        - name: Running the script the checklist
+          shell: sh /usr/local/support/nchecklist -m > /tmp/patches_script-output/nchecklist
+
+        ##########################################################################
+        ## Running the script to enable the NTP
+        ##########################################################################
+        - name: Running the script to enable the NTP
+          shell: sh /usr/local/support/enable_NTP.sh > /tmp/patches_script-output/enable_NTP
+
+        ###########################################################################
+        ## Check if reboot is required
+        ###########################################################################
+        - name: Comparing last kernel and running kernel
+          shell: |
+            LAST_KERNEL=$(rpm -q --last kernel | perl -pe 's/^kernel-(\S+).*/$1/' | head -1)
+            CURRENT_KERNEL=$(uname -r)
+            if [[ $LAST_KERNEL != $CURRENT_KERNEL ]]; then
+              # Set reboot flag
+              touch /tmp/reboot
+            fi
+          tags:
+            - skip_ansible_lint
+
+        ##########################################################################
+        ## Checking if all packages were installed
+        ##########################################################################
+        - name: Checking if all packages were installed
+          shell: zypper list-updates | awk 'f;/Name/{f=1;}' | awk '{ print $5 }'
+          changed_when: patches_chk.stdout_lines | length > 0
+          args:
+              warn: false
+          register: patches_chk
+
+        - name: Display patches available to be installed
+          debug:
+            msg: "Found {{ patches_chk.stdout_lines | length }} packages to be updated:{{ patches_chk.stdout | replace('\n', '   ') }}"
+
+        - debug:
+            msg: "Yes, all packages were installed."
+          when: patches_chk.stdout_lines | length == 0
+
+        - debug:
+            msg: "The following packages are pending to be installed ({{ patches_chk.stdout_lines | length }}): {{ patches_chk.stdout }}"
+          when: patches_chk.stdout_lines | length > 0
+
+
+        ###########################################################################
+        ## Reboot the server if required
+        ###########################################################################
+        - name: Checking if reboot flag exists
+          stat:
+            path: /tmp/reboot
+          register: reboot
+
+        - name: Clearing reboot flag
+          file:
+            path: /tmp/reboot
+            state: absent
+          when: reboot.stat.exists == true
+
+        - name: Rebooting the server
+          shell: sleep 2 && /sbin/shutdown -r now "Reboot required for updated kernel." && sleep 2
+          async: 20
+          poll: 0
+          when: reboot.stat.exists == true
+
+        ###########################################################################
+        ## Waiting the reboot be completed
+        ###########################################################################
+        - name: Waiting the server complete the reboot
+          wait_for_connection:
+            delay: 120
+            timeout: 1200
+          when: reboot.stat.exists == true
+
+        ###########################################################################
+        ## Saving kernel install date
+        ###########################################################################
+        - name: Saving kernel install date
+          shell: sh /usr/local/support/save_kernel_date.sh > /tmp/patches_script-output/save_kernel_date
+
+        ###########################################################################
+        ## Running script /usr/local/support/layer2/restore.sh
+        ###########################################################################
+        - name: Running script /usr/local/support/layer2/restore.sh
+          shell: sh /usr/local/support/layer2/restore.sh > /tmp/patches_script-output/layer2_restore
+
+        ###########################################################################
+        ## Running the script /usr/sbin/grub2-zipl-setup
+        ###########################################################################
+        - name: Running the script /usr/sbin/grub2-zipl-setup
+          shell: /usr/sbin/grub2-zipl-setup > /tmp/patches_script-output/grub2-zipl-setup
