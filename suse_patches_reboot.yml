@@ -15,14 +15,13 @@
 
 ---
 - name: Performing zypper update on host(s)
-  hosts: ZLINUX_ZTRAINING
+  hosts: teste
   remote_user: ansible
   become: yes
   become_method: sudo
   any_errors_fatal: false
 
   pre_tasks:
-
 
         ##########################################################################
         ## Creating the directory to save the output of scripts
